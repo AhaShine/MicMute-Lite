@@ -11,7 +11,6 @@ MicMute Lite is a small Windows tray utility for muting and unmuting a microphon
 - can use custom `on/off` sound files placed next to the executable
 - shows a movable and resizable on-screen overlay with microphone state
 - keeps theme, language, hotkey, device, and overlay settings between launches
-- reuses the running instance: launching the exe again opens Settings instead of starting duplicates
 
 ## Quick start
 
