@@ -1,0 +1,12 @@
+[project]
+name = "micmute-lite"
+version = "0.1.0"
+description = "Small Windows tray utility for microphone mute hotkeys and overlay state."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "comtypes",
+    "pillow",
+    "pycaw",
+    "pystray",
+]

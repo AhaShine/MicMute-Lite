@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 from typing import Callable
 
 
@@ -36,11 +37,13 @@ class SingleInstanceBridge:
         return True
 
     def signal_existing(self) -> None:
-        try:
-            with socket.create_connection((APP_HOST, APP_PORT), timeout=1) as client:
-                client.sendall(SHOW_COMMAND)
-        except OSError:
-            pass
+        for _attempt in range(6):
+            try:
+                with socket.create_connection((APP_HOST, APP_PORT), timeout=1) as client:
+                    client.sendall(SHOW_COMMAND)
+                    return
+            except OSError:
+                time.sleep(0.12)
 
     def stop(self) -> None:
         self._stop.set()

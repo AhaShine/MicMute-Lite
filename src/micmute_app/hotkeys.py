@@ -54,6 +54,7 @@ MODIFIER_VKS = {
     0x5B: "Win",
     0x5C: "Win",
 }
+UNASSIGNED_LABEL = "Unassigned"
 
 
 @dataclass(frozen=True)
@@ -66,7 +67,7 @@ class HotkeySpec:
     @property
     def label(self) -> str:
         if not self.display:
-            return "Не назначено"
+            return UNASSIGNED_LABEL
         return format_hotkey_label(self.display, self.modifiers)
 
 
@@ -81,7 +82,7 @@ def normalized_modifiers(modifiers: list[str] | tuple[str, ...] | set[str]) -> t
 
 def format_hotkey_label(main_display: str, modifiers: list[str] | tuple[str, ...]) -> str:
     if not main_display:
-        return "Не назначено"
+        return UNASSIGNED_LABEL
     ordered = list(normalized_modifiers(tuple(modifiers)))
     ordered.append(main_display)
     return " + ".join(ordered)

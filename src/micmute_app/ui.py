@@ -3,20 +3,24 @@ from __future__ import annotations
 import ctypes
 import queue
 import tkinter as tk
+import time
 from ctypes import wintypes
+from tkinter import font as tkfont
 from tkinter import ttk
 
-from PIL import ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
-from . import APP_NAME, APP_VERSION
-from .assets import load_app_icon
-from .audio import MicrophoneInfo, MicrophoneService, SoundService
-from .config import ConfigStore
+from . import APP_NAME
+from .assets import load_app_icon, load_overlay_icon
+from .audio import MicrophoneInfo, MicrophoneService, MicrophoneState, SoundService
+from .config import ConfigStore, set_autostart
+from .guardian import start_guardian
 from .hooks import GlobalHookManager
 from .hotkeys import HotkeySpec
 from .ipc import SingleInstanceBridge
 from .overlay import OverlayManager
 from .tray import TrayController
+from .wincompat import enable_dpi_awareness
 
 
 LRESULT = ctypes.c_longlong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_long
@@ -30,6 +34,23 @@ except OSError:
 else:
     dwmapi.DwmSetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
     dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+
+
+try:
+    uxtheme = ctypes.WinDLL("uxtheme")
+    AllowDarkModeForWindow = uxtheme[133]
+    AllowDarkModeForWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
+    AllowDarkModeForWindow.restype = wintypes.BOOL
+    SetPreferredAppMode = uxtheme[135]
+    SetPreferredAppMode.argtypes = [ctypes.c_int]
+    SetPreferredAppMode.restype = ctypes.c_int
+    FlushMenuThemes = uxtheme[136]
+    FlushMenuThemes.argtypes = []
+    FlushMenuThemes.restype = None
+except (OSError, AttributeError, TypeError):
+    AllowDarkModeForWindow = None
+    SetPreferredAppMode = None
+    FlushMenuThemes = None
 
 
 DWMWA_USE_IMMERSIVE_DARK_MODE = 20
@@ -50,6 +71,10 @@ SWP_NOMOVE = 0x0002
 SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 SWP_FRAMECHANGED = 0x0020
+GA_ROOT = 2
+SW_RESTORE = 9
+HWND_TOPMOST = wintypes.HWND(-1)
+HWND_NOTOPMOST = wintypes.HWND(-2)
 
 user32 = ctypes.windll.user32
 user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
@@ -60,6 +85,16 @@ user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.GetWindowLongPtrW.restype = LONG_PTR
 user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, LONG_PTR]
 user32.SetWindowLongPtrW.restype = LONG_PTR
+user32.GetParent.argtypes = [wintypes.HWND]
+user32.GetParent.restype = wintypes.HWND
+user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+user32.GetAncestor.restype = wintypes.HWND
+user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.ShowWindow.restype = wintypes.BOOL
+user32.BringWindowToTop.argtypes = [wintypes.HWND]
+user32.BringWindowToTop.restype = wintypes.BOOL
+user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+user32.SetForegroundWindow.restype = wintypes.BOOL
 user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
 user32.SetWindowPos.restype = wintypes.BOOL
 
@@ -78,16 +113,14 @@ TEXTS = {
         "bind": "Бинд",
         "assign": "Назначить",
         "clear": "Очистить",
-        "toggle_now": "Переключить сейчас",
-        "dark_theme": "Тёмная тема",
+        "toggle_now": "Переключить",
         "sounds_enabled": "Звуки on/off",
+        "autostart": "Автозапуск",
+        "general": "Общее",
         "overlay": "Overlay",
         "show_overlay": "Показывать overlay",
-        "edit_overlay": "Редактировать overlay",
-        "edit_overlay_active": "Редактирование overlay: ON",
-        "overlay_drag_hint": "Тяни overlay мышкой. За правый нижний угол можно менять размер.",
-        "sound_note": "Если рядом с exe лежат on.mp3 / off.mp3, программа подхватит их сама. Если файл не откроется, она тихо вернётся на встроенные звуки.",
-        "hide": "Скрыть",
+        "edit_overlay": "Изменить",
+        "edit_overlay_active": "Готово",
         "default_device": "По умолчанию: {name}",
         "status_on": "Микрофон включен",
         "status_off": "Микрофон выключен",
@@ -115,16 +148,14 @@ TEXTS = {
         "bind": "Bind",
         "assign": "Assign",
         "clear": "Clear",
-        "toggle_now": "Toggle now",
-        "dark_theme": "Dark theme",
+        "toggle_now": "Toggle",
         "sounds_enabled": "On/off sounds",
+        "autostart": "Autostart",
+        "general": "General",
         "overlay": "Overlay",
         "show_overlay": "Show overlay",
-        "edit_overlay": "Edit overlay",
-        "edit_overlay_active": "Overlay edit: ON",
-        "overlay_drag_hint": "Drag the overlay. Use the bottom-right corner to resize it.",
-        "sound_note": "If on.mp3 / off.mp3 are next to the exe, the app will use them first. If the file cannot be played, it will quietly fall back to built-in sounds.",
-        "hide": "Hide",
+        "edit_overlay": "Edit",
+        "edit_overlay_active": "Done",
         "default_device": "Default: {name}",
         "status_on": "Microphone is on",
         "status_off": "Microphone is off",
@@ -144,28 +175,19 @@ TEXTS = {
 
 PALETTES = {
     "dark": {
-        "window_bg": "#111315",
-        "surface_bg": "#181B1F",
-        "input_bg": "#0E1013",
-        "border": "#2D3138",
-        "text": "#F5F7FA",
-        "muted": "#9AA4B2",
-        "button_bg": "#20242A",
-        "button_hover": "#2B3037",
-        "accent_on": "#2BB673",
-        "accent_off": "#D94D57",
-    },
-    "light": {
-        "window_bg": "#E7ECF1",
-        "surface_bg": "#F2F5F8",
-        "input_bg": "#ECF1F5",
-        "border": "#C5CED8",
-        "text": "#16202A",
-        "muted": "#6A7380",
-        "button_bg": "#E1E8F0",
-        "button_hover": "#D5DEE8",
-        "accent_on": "#0F8A57",
-        "accent_off": "#C53D45",
+        "window_bg": "#080808",
+        "surface_bg": "#111111",
+        "surface_raised": "#151515",
+        "input_bg": "#0B0B0B",
+        "border": "#2B2B2B",
+        "border_hot": "#464646",
+        "text": "#F2F2F2",
+        "muted": "#A8A8A8",
+        "button_bg": "#181818",
+        "button_hover": "#262626",
+        "accent_on": "#24D17E",
+        "accent_off": "#F0445E",
+        "warn": "#F4B860",
     },
 }
 
@@ -178,23 +200,62 @@ def _hex_to_colorref(hex_color: str) -> int:
     return red | (green << 8) | (blue << 16)
 
 
+def _enable_dark_app_mode() -> None:
+    if SetPreferredAppMode is None or FlushMenuThemes is None:
+        return
+    try:
+        SetPreferredAppMode(2)
+        FlushMenuThemes()
+    except (OSError, ValueError):
+        pass
+
+
+def _window_handles(window: tk.Toplevel) -> list[int]:
+    handles: list[int] = []
+    try:
+        base = int(window.winfo_id())
+    except tk.TclError:
+        return handles
+
+    for handle in (
+        base,
+        int(user32.GetParent(wintypes.HWND(base)) or 0),
+        int(user32.GetAncestor(wintypes.HWND(base), GA_ROOT) or 0),
+    ):
+        if handle and handle not in handles:
+            handles.append(handle)
+    return handles
+
+
 def _apply_window_titlebar_theme(window: tk.Toplevel, dark: bool, palette: dict[str, str] | None = None) -> None:
     if dwmapi is None:
         return
     try:
         window.update_idletasks()
-        hwnd = wintypes.HWND(window.winfo_id())
         value = ctypes.c_int(1 if dark else 0)
-        for attribute in (DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD):
-            dwmapi.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(value), ctypes.sizeof(value))
-        if palette is not None:
-            caption = wintypes.DWORD(_hex_to_colorref(palette["surface_bg"] if dark else palette["window_bg"]))
-            border = wintypes.DWORD(_hex_to_colorref(palette["border"]))
-            text = wintypes.DWORD(_hex_to_colorref("#F5F7FA" if dark else "#16202A"))
-            dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, ctypes.byref(caption), ctypes.sizeof(caption))
-            dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ctypes.byref(border), ctypes.sizeof(border))
-            dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, ctypes.byref(text), ctypes.sizeof(text))
-    except tk.TclError:
+        for handle in _window_handles(window):
+            hwnd = wintypes.HWND(handle)
+            if AllowDarkModeForWindow is not None:
+                AllowDarkModeForWindow(hwnd, wintypes.BOOL(1 if dark else 0))
+            for attribute in (DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD):
+                dwmapi.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(value), ctypes.sizeof(value))
+            if palette is not None:
+                caption = wintypes.DWORD(_hex_to_colorref(palette["window_bg"]))
+                border = wintypes.DWORD(_hex_to_colorref(palette["border"]))
+                text = wintypes.DWORD(_hex_to_colorref("#FFFFFF" if dark else "#16202A"))
+                dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, ctypes.byref(caption), ctypes.sizeof(caption))
+                dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ctypes.byref(border), ctypes.sizeof(border))
+                dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, ctypes.byref(text), ctypes.sizeof(text))
+            user32.SetWindowPos(
+                hwnd,
+                wintypes.HWND(0),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            )
+    except (tk.TclError, OSError, ValueError):
         pass
 
 
@@ -219,8 +280,372 @@ def _apply_appwindow_style(window: tk.Toplevel) -> None:
         pass
 
 
+class DarkSelect(tk.Canvas):
+    def __init__(self, parent: tk.Widget, palette_provider, command=None, height: int = 30) -> None:
+        super().__init__(parent, height=height, bd=0, highlightthickness=0, cursor="hand2")
+        self._palette_provider = palette_provider
+        self._command = command
+        self._height = height
+        self._items: list[str] = []
+        self._selected_index = -1
+        self._dropdown: tk.Toplevel | None = None
+        self._hover = False
+        self._suppress_owner_click_until = 0.0
+        self._image_ref: ImageTk.PhotoImage | None = None
+        self._font = tkfont.Font(family="Segoe UI", size=9)
+
+        self.bind("<Configure>", lambda _event: self._draw())
+        self.bind("<ButtonPress-1>", self._owner_click)
+        self.bind("<Enter>", self._enter)
+        self.bind("<Leave>", self._leave)
+        self.bind("<MouseWheel>", lambda _event: "break")
+        self.apply_theme()
+
+    def set_options(self, options: list[str], selected_index: int = 0, notify: bool = False) -> None:
+        self._items = list(options)
+        if not self._items:
+            self._selected_index = -1
+            self._draw()
+            self.close_dropdown()
+            return
+        self.set_current(max(0, min(selected_index, len(self._items) - 1)), notify=notify)
+
+    def current(self) -> int:
+        return self._selected_index
+
+    def set_current(self, index: int, notify: bool = False) -> None:
+        if index < 0 or index >= len(self._items):
+            return
+        changed = index != self._selected_index
+        self._selected_index = index
+        self._draw()
+        if notify and changed and self._command is not None:
+            self._command()
+
+    def apply_theme(self) -> None:
+        colors = self._palette_provider()
+        self.configure(bg=self._parent_bg(), height=self._height)
+        self._draw()
+
+    def _owner_click(self, _event) -> str:
+        if time.monotonic() < self._suppress_owner_click_until:
+            self._suppress_owner_click_until = 0.0
+            return "break"
+        self.toggle_dropdown()
+        return "break"
+
+    def toggle_dropdown(self) -> None:
+        if self._dropdown is not None and self._dropdown.winfo_exists():
+            self.close_dropdown()
+        else:
+            self.open_dropdown()
+
+    def open_dropdown(self) -> None:
+        if not self._items:
+            return
+        self.close_dropdown()
+        colors = self._palette_provider()
+        dropdown = tk.Toplevel(self)
+        dropdown.overrideredirect(True)
+        dropdown.attributes("-topmost", True)
+        dropdown.configure(bg=colors["border"])
+        self._dropdown = dropdown
+
+        width = max(self.winfo_width(), 160)
+        item_height = 26
+        visible_count = min(len(self._items), 8)
+        x = self.winfo_rootx()
+        y = self.winfo_rooty() + self.winfo_height() + 2
+        dropdown.geometry(f"{width}x{visible_count * item_height + 2}+{x}+{y}")
+
+        box = tk.Frame(dropdown, bg=colors["surface_raised"])
+        box.pack(fill="both", expand=True, padx=1, pady=1)
+        for index, value in enumerate(self._items[:visible_count]):
+            bg = colors["button_hover"] if index == self._selected_index else colors["surface_raised"]
+            item = tk.Label(box, text=value, anchor="w", padx=9, bg=bg, fg=colors["text"], font=("Segoe UI", 9))
+            item.pack(fill="x", ipady=4)
+            item.bind("<Button-1>", lambda _event, item_index=index: self._pick(item_index))
+            item.bind("<Enter>", lambda _event, widget=item: widget.configure(bg=colors["button_hover"]))
+            item.bind("<Leave>", lambda _event, widget=item, item_index=index: widget.configure(bg=colors["button_hover"] if item_index == self._selected_index else colors["surface_raised"]))
+
+        dropdown.bind("<FocusOut>", lambda _event: self.close_dropdown(suppress_owner_click=True))
+        dropdown.after(10, dropdown.focus_force)
+
+    def close_dropdown(self, suppress_owner_click: bool = False) -> None:
+        if suppress_owner_click:
+            self._suppress_owner_click_until = time.monotonic() + 0.25
+        if self._dropdown is not None and self._dropdown.winfo_exists():
+            self._dropdown.destroy()
+        self._dropdown = None
+
+    def _pick(self, index: int) -> None:
+        self.set_current(index, notify=True)
+        self.close_dropdown()
+
+    def _enter(self, _event) -> None:
+        self._hover = True
+        self._draw()
+
+    def _leave(self, _event) -> None:
+        self._hover = False
+        self._draw()
+
+    def _parent_bg(self) -> str:
+        try:
+            return self.master.cget("bg")
+        except tk.TclError:
+            return "#0B0B0B"
+
+    def _trim_text(self, text: str, max_width: int) -> str:
+        if self._font.measure(text) <= max_width:
+            return text
+        ellipsis = "..."
+        available = max(0, max_width - self._font.measure(ellipsis))
+        trimmed = text
+        while trimmed and self._font.measure(trimmed) > available:
+            trimmed = trimmed[:-1]
+        return trimmed.rstrip() + ellipsis
+
+    def _draw(self) -> None:
+        colors = self._palette_provider()
+        width = max(2, self.winfo_width())
+        height = self._height
+        border = colors["border_hot"] if self._hover or (self._dropdown is not None and self._dropdown.winfo_exists()) else colors["border"]
+        self._image_ref = _rounded_photo(width, height, 8, colors["input_bg"], border, self._parent_bg())
+        self.delete("all")
+        self.create_image(0, 0, anchor="nw", image=self._image_ref)
+        arrow_x = width - 27
+        self.create_line(arrow_x, 5, arrow_x, height - 5, fill=colors["border"])
+        self.create_polygon(
+            arrow_x + 9,
+            height // 2 - 2,
+            arrow_x + 16,
+            height // 2 - 2,
+            arrow_x + 12,
+            height // 2 + 3,
+            fill=colors["muted"],
+            outline="",
+        )
+        text = self._items[self._selected_index] if 0 <= self._selected_index < len(self._items) else ""
+        self.create_text(10, height // 2, text=self._trim_text(text, max(20, width - 45)), fill=colors["text"], font=self._font, anchor="w")
+
+
+def _rounded_points(x1: int, y1: int, x2: int, y2: int, radius: int) -> list[int]:
+    radius = max(1, min(radius, (x2 - x1) // 2, (y2 - y1) // 2))
+    return [
+        x1 + radius,
+        y1,
+        x2 - radius,
+        y1,
+        x2,
+        y1,
+        x2,
+        y1 + radius,
+        x2,
+        y2 - radius,
+        x2,
+        y2,
+        x2 - radius,
+        y2,
+        x1 + radius,
+        y2,
+        x1,
+        y2,
+        x1,
+        y2 - radius,
+        x1,
+        y1 + radius,
+        x1,
+        y1,
+    ]
+
+
+def _rounded_photo(width: int, height: int, radius: int, fill: str, outline: str, outer_bg: str, border_width: int = 1) -> ImageTk.PhotoImage:
+    scale = 3
+    width = max(2, int(width))
+    height = max(2, int(height))
+    image = Image.new("RGB", (width * scale, height * scale), outer_bg)
+    draw = ImageDraw.Draw(image)
+    rect = (0, 0, width * scale - 1, height * scale - 1)
+    draw.rounded_rectangle(
+        rect,
+        radius=max(1, radius * scale),
+        fill=fill,
+        outline=outline,
+        width=max(1, border_width * scale),
+    )
+    image = image.resize((width, height), Image.Resampling.LANCZOS)
+    return ImageTk.PhotoImage(image)
+
+
+class RoundedPanel(tk.Canvas):
+    def __init__(self, parent: tk.Widget, palette_provider, height: int, fill_key: str = "surface_bg", radius: int = 12, padding: int = 12) -> None:
+        super().__init__(parent, height=height, bd=0, highlightthickness=0)
+        self._palette_provider = palette_provider
+        self._height = height
+        self._fill_key = fill_key
+        self._radius = radius
+        self._padding = padding
+        self._image_ref: ImageTk.PhotoImage | None = None
+        colors = self._palette_provider()
+        self.inner = tk.Frame(self, bg=colors[fill_key])
+        self._inner_window = self.create_window(padding, padding, anchor="nw", window=self.inner)
+        self.bind("<Configure>", lambda _event: self._draw())
+        self.apply_theme()
+
+    def apply_theme(self) -> None:
+        colors = self._palette_provider()
+        self.configure(bg=colors["window_bg"], height=self._height)
+        self.inner.configure(bg=colors[self._fill_key])
+        self._draw()
+
+    def _parent_bg(self) -> str:
+        try:
+            return self.master.cget("bg")
+        except tk.TclError:
+            return "#0B0B0B"
+
+    def _draw(self) -> None:
+        colors = self._palette_provider()
+        width = max(2, self.winfo_width())
+        height = max(2, self._height)
+        self.delete("panel")
+        self._image_ref = _rounded_photo(width, height, self._radius, colors[self._fill_key], colors["border"], self._parent_bg())
+        self.create_image(0, 0, anchor="nw", image=self._image_ref, tags="panel")
+        inner_width = max(10, width - self._padding * 2)
+        inner_height = max(10, height - self._padding * 2)
+        self.itemconfigure(self._inner_window, width=inner_width, height=inner_height)
+
+
+class RoundButton(tk.Canvas):
+    def __init__(
+        self,
+        parent: tk.Widget,
+        text: str,
+        command,
+        colors: dict[str, str],
+        width_chars: int | None = None,
+        height: int = 34,
+        width_px: int | None = None,
+        font: tuple[str, int] | tuple[str, int, str] = ("Segoe UI", 9),
+        align: str = "center",
+    ) -> None:
+        width = width_px if width_px is not None else (86 if width_chars is None else max(42, width_chars * 8 + 24))
+        super().__init__(parent, width=width, height=height, bd=0, highlightthickness=0, cursor="hand2")
+        self._command = command
+        self._text = text
+        self._width = width
+        self._height = height
+        self._radius = 9
+        self._align = align
+        self._font = tkfont.Font(family=font[0], size=font[1], weight=font[2] if len(font) > 2 else "normal")
+        self._image_ref: ImageTk.PhotoImage | None = None
+        self._fill = colors["button_bg"]
+        self._hover = colors["button_hover"]
+        self._pressed = "#303030"
+        self._fg = colors["text"]
+        self._border = colors["border"]
+        self._over = False
+        self._down = False
+        self._state = "normal"
+        super().configure(bg=self._parent_bg())
+        self.bind("<Enter>", self._enter)
+        self.bind("<Leave>", self._leave)
+        self.bind("<ButtonPress-1>", self._press)
+        self.bind("<ButtonRelease-1>", self._release)
+        self._draw()
+
+    def configure(self, cnf=None, **kwargs):
+        if cnf:
+            kwargs.update(cnf)
+        if not kwargs:
+            return super().configure()
+
+        if "text" in kwargs:
+            self._text = kwargs.pop("text")
+        if "command" in kwargs:
+            self._command = kwargs.pop("command")
+        if "bg" in kwargs:
+            self._fill = kwargs.pop("bg")
+        if "fg" in kwargs:
+            self._fg = kwargs.pop("fg")
+        if "activebackground" in kwargs:
+            self._hover = kwargs.pop("activebackground")
+        if "highlightbackground" in kwargs:
+            self._border = kwargs.pop("highlightbackground")
+        if "state" in kwargs:
+            self._state = kwargs.pop("state")
+        kwargs.pop("activeforeground", None)
+        kwargs.pop("highlightcolor", None)
+        kwargs.pop("disabledforeground", None)
+        kwargs.pop("relief", None)
+        kwargs.pop("borderwidth", None)
+        if kwargs:
+            super().configure(**kwargs)
+        self._draw()
+
+    config = configure
+
+    def apply_theme(self, colors: dict[str, str]) -> None:
+        self.configure(bg=colors["button_bg"], fg=colors["text"], activebackground=colors["button_hover"], highlightbackground=colors["border"])
+
+    def _parent_bg(self) -> str:
+        try:
+            return self.master.cget("bg")
+        except tk.TclError:
+            return "#080808"
+
+    def _draw(self) -> None:
+        super().configure(bg=self._parent_bg())
+        self.delete("all")
+        disabled = self._state == "disabled"
+        fill = self._pressed if self._down else (self._hover if self._over else self._fill)
+        self._image_ref = _rounded_photo(self._width, self._height, self._radius, fill, self._border, self._parent_bg())
+        self.create_image(0, 0, anchor="nw", image=self._image_ref)
+        fg = "#8D8D8D" if disabled else self._fg
+        if self._align == "left":
+            text = self._trim_text(self._text, max(20, self._width - 22))
+            self.create_text(11, self._height // 2, text=text, fill=fg, font=self._font, anchor="w")
+        else:
+            self.create_text(self._width // 2, self._height // 2, text=self._text, fill=fg, font=self._font)
+
+    def _trim_text(self, text: str, max_width: int) -> str:
+        if self._font.measure(text) <= max_width:
+            return text
+        ellipsis = "..."
+        available = max(0, max_width - self._font.measure(ellipsis))
+        trimmed = text
+        while trimmed and self._font.measure(trimmed) > available:
+            trimmed = trimmed[:-1]
+        return trimmed.rstrip() + ellipsis
+
+    def _enter(self, _event) -> None:
+        self._over = True
+        self._draw()
+
+    def _leave(self, _event) -> None:
+        self._over = False
+        self._down = False
+        self._draw()
+
+    def _press(self, _event) -> None:
+        if self._state == "disabled":
+            return
+        self._down = True
+        self._draw()
+
+    def _release(self, event) -> None:
+        if self._state == "disabled":
+            return
+        was_down = self._down
+        self._down = False
+        self._draw()
+        if was_down and 0 <= event.x <= self._width and 0 <= event.y <= self._height and self._command is not None:
+            self._command()
+
+
 class MicMuteApp:
-    def __init__(self) -> None:
+    def __init__(self, start_hidden: bool = False) -> None:
         self.should_exit_immediately = False
         self.command_queue: queue.Queue[tuple[str, object | None]] = queue.Queue()
         self.ipc = SingleInstanceBridge(lambda: self.command_queue.put(("show_settings", None)))
@@ -231,7 +656,7 @@ class MicMuteApp:
         self.config_store = ConfigStore()
         self.first_run = not self.config_store.path.exists()
         self.config = self.config_store.load()
-        self.config.suppress_hotkey = True
+        self.config.suppress_hotkey = False
         if abs(self.config.overlay_position_x - 0.88) < 0.001 and abs(self.config.overlay_position_y - 0.1) < 0.001:
             self.config.overlay_position_x = 0.5
             self.config.overlay_position_y = 0.14
@@ -240,57 +665,61 @@ class MicMuteApp:
         self.audio = MicrophoneService()
         self.sounds = SoundService()
         self.hooks = GlobalHookManager(self._enqueue_hook_event)
-        self.hooks.start()
 
+        _enable_dark_app_mode()
+        enable_dpi_awareness()
+
+        self.hooks.start()
         self.root = tk.Tk()
         self.root.geometry("1x1+-32000+-32000")
         self.root.overrideredirect(True)
         self.root.title(APP_NAME)
         self._app_icon_small_ref: ImageTk.PhotoImage | None = None
         self._app_icon_large_ref: ImageTk.PhotoImage | None = None
-        self._titlebar_icon_ref: ImageTk.PhotoImage | None = None
+        self._status_icon_ref: ImageTk.PhotoImage | None = None
         self._apply_app_icon(self.root)
         self.root.withdraw()
 
         self.settings_window: tk.Toplevel | None = None
+        self.tray_menu: tk.Toplevel | None = None
         self._settings_ready = False
         self._overlay_edit_active = False
+        self._tray_menu_hotkeys_paused = False
+        self._tray_menu_resume_job: str | None = None
+        self._localized_widgets: list[tuple[tk.Widget, str]] = []
+        self._guardian_device_ids: set[str] = set()
 
         self.tray = TrayController(self.command_queue, self._text)
         self.overlay = OverlayManager(self.root)
         self.devices: list[MicrophoneInfo] = []
         self.hotkey_is_held = False
-        self.current_state = self.audio.get_state(self.config.microphone_id)
+        self.current_state = MicrophoneState(id="", name="", is_muted=True, is_available=False, is_default=True)
 
         self.mic_var = tk.StringVar()
         self.mode_var = tk.StringVar(value=self._mode_label(self.config.mode))
         self.hotkey_var = tk.StringVar(value=self.config.hotkey.label if self.config.hotkey else self._text("unassigned"))
         self.status_var = tk.StringVar()
         self.substatus_var = tk.StringVar()
-        self.theme_var = tk.BooleanVar(value=self.config.dark_theme)
         self.sounds_var = tk.BooleanVar(value=self.config.sounds_enabled)
+        self.autostart_var = tk.BooleanVar(value=self.config.autostart)
         self.overlay_var = tk.BooleanVar(value=self.config.overlay_enabled)
         self.overlay_x_var = tk.DoubleVar(value=self.config.overlay_position_x * 100)
         self.overlay_y_var = tk.DoubleVar(value=self.config.overlay_position_y * 100)
         self.overlay_scale_var = tk.DoubleVar(value=self.config.overlay_scale * 100)
-        self._window_drag_offset_x = 0
-        self._window_drag_offset_y = 0
 
-        self.mic_combo: ttk.Combobox | None = None
-        self.mode_combo: ttk.Combobox | None = None
+        self.mic_combo: DarkSelect | None = None
+        self.mode_combo: DarkSelect | None = None
         self.status_label: tk.Label | None = None
         self.substatus_label: tk.Label | None = None
-        self.overlay_edit_button: tk.Button | None = None
-        self.lang_ru_button: tk.Button | None = None
-        self.lang_en_button: tk.Button | None = None
-        self.titlebar_frame: tk.Frame | None = None
-        self.titlebar_icon_label: tk.Label | None = None
-        self.titlebar_label: tk.Label | None = None
-        self.titlebar_minimize_button: tk.Button | None = None
-        self.titlebar_close_button: tk.Button | None = None
+        self.status_icon_label: tk.Label | None = None
+        self.hotkey_button: RoundButton | None = None
+        self.overlay_edit_button: RoundButton | None = None
+        self.lang_ru_button: RoundButton | None = None
+        self.lang_en_button: RoundButton | None = None
 
         self._load_microphones()
-        self._apply_runtime_state(enforce_idle_state=True, play_sound=False)
+        self._ensure_guardian_if_muted()
+        self._apply_runtime_state(enforce_idle_state=True, play_sound=False, refresh_state=False)
         self.tray.start(
             self.current_state.is_muted,
             self.config.overlay_enabled,
@@ -302,7 +731,7 @@ class MicMuteApp:
         self._poll_microphone_state()
         self._pulse_overlay()
 
-        if self.first_run:
+        if not start_hidden:
             self.show_settings()
 
     def _text(self, key: str) -> str:
@@ -316,6 +745,10 @@ class MicMuteApp:
         return [self._mode_label(mode) for mode in MODE_ORDER]
 
     def _selected_mode(self) -> str:
+        if self.mode_combo is not None:
+            index = self.mode_combo.current()
+            if 0 <= index < len(MODE_ORDER):
+                return MODE_ORDER[index]
         current = self.mode_var.get()
         for mode in MODE_ORDER:
             if current == self._mode_label(mode):
@@ -323,10 +756,16 @@ class MicMuteApp:
         return "toggle"
 
     def _palette(self) -> dict[str, str]:
-        return PALETTES["dark" if self.config.dark_theme else "light"]
+        return PALETTES["dark"]
 
     def _tag(self, widget: tk.Widget, role: str) -> tk.Widget:
         setattr(widget, "_theme_role", role)
+        return widget
+
+    def _localize(self, widget: tk.Widget, key: str) -> tk.Widget:
+        setattr(widget, "_text_key", key)
+        self._localized_widgets.append((widget, key))
+        widget.configure(text=self._text(key))
         return widget
 
     def _iter_widgets(self, widget: tk.Widget):
@@ -365,24 +804,6 @@ class MicMuteApp:
             arrowcolor=[("readonly", colors["text"])],
         )
 
-    def _style_combobox_popdown(self, combo: ttk.Combobox | None) -> None:
-        if combo is None:
-            return
-        colors = self._palette()
-        try:
-            popdown = combo.tk.call("ttk::combobox::PopdownWindow", combo)
-            listbox = combo.nametowidget(f"{popdown}.f.l")
-            listbox.configure(
-                bg=colors["input_bg"],
-                fg=colors["text"],
-                selectbackground=colors["button_hover"],
-                selectforeground=colors["text"],
-                highlightthickness=0,
-                bd=0,
-            )
-        except (tk.TclError, KeyError):
-            pass
-
     def _update_language_buttons_state(self) -> None:
         selected = self.config.language
         if self.lang_ru_button is not None:
@@ -396,13 +817,21 @@ class MicMuteApp:
 
         self._setup_styles()
         colors = self._palette()
-        self.settings_window.configure(bg=colors["border"])
+        self.settings_window.configure(bg=colors["window_bg"])
 
         for widget in self._iter_widgets(self.settings_window):
             role = getattr(widget, "_theme_role", None)
 
-            if isinstance(widget, ttk.Combobox):
-                widget.configure(style="MicMute.TCombobox")
+            if isinstance(widget, RoundedPanel):
+                widget.apply_theme()
+                continue
+
+            if isinstance(widget, RoundButton):
+                widget.apply_theme(colors)
+                continue
+
+            if isinstance(widget, DarkSelect):
+                widget.apply_theme()
                 continue
 
             if role == "window_frame":
@@ -411,20 +840,20 @@ class MicMuteApp:
                 widget.configure(bg=colors["border"])
             elif role == "surface_frame":
                 widget.configure(bg=colors["surface_bg"], highlightbackground=colors["border"])
-            elif role == "titlebar_frame":
-                widget.configure(bg=colors["surface_bg"])
-            elif role == "titlebar_icon":
-                widget.configure(bg=colors["surface_bg"])
-            elif role == "titlebar_text":
-                widget.configure(bg=colors["surface_bg"], fg=colors["text"])
+            elif role == "raised_frame":
+                widget.configure(bg=colors["surface_raised"], highlightbackground=colors["border"])
             elif role == "window_text":
                 widget.configure(bg=colors["window_bg"], fg=colors["text"])
             elif role == "surface_text":
                 widget.configure(bg=colors["surface_bg"], fg=colors["text"])
+            elif role == "raised_text":
+                widget.configure(bg=colors["surface_raised"], fg=colors["text"])
             elif role == "muted_window":
                 widget.configure(bg=colors["window_bg"], fg=colors["muted"])
             elif role == "muted_surface":
                 widget.configure(bg=colors["surface_bg"], fg=colors["muted"])
+            elif role == "muted_raised":
+                widget.configure(bg=colors["surface_raised"], fg=colors["muted"])
             elif role == "input_label":
                 widget.configure(
                     bg=colors["input_bg"],
@@ -440,26 +869,6 @@ class MicMuteApp:
                     activeforeground=colors["text"],
                     highlightbackground=colors["border"],
                     highlightcolor=colors["border"],
-                    disabledforeground=colors["muted"],
-                )
-            elif role == "titlebar_button":
-                widget.configure(
-                    bg=colors["surface_bg"],
-                    fg=colors["text"],
-                    activebackground=colors["button_hover"],
-                    activeforeground=colors["text"],
-                    highlightbackground=colors["surface_bg"],
-                    highlightcolor=colors["surface_bg"],
-                    disabledforeground=colors["muted"],
-                )
-            elif role == "titlebar_close_button":
-                widget.configure(
-                    bg=colors["surface_bg"],
-                    fg=colors["text"],
-                    activebackground=colors["accent_off"],
-                    activeforeground="#F7FAFC",
-                    highlightbackground=colors["surface_bg"],
-                    highlightcolor=colors["surface_bg"],
                     disabledforeground=colors["muted"],
                 )
             elif role == "check":
@@ -481,36 +890,25 @@ class MicMuteApp:
                     bd=0,
                 )
 
-        self._style_combobox_popdown(self.mic_combo)
-        self._style_combobox_popdown(self.mode_combo)
         self._update_language_buttons_state()
         self._sync_overlay_edit_button_state()
         self._refresh_status_ui()
-        if self.titlebar_icon_label is not None:
-            self.titlebar_icon_label.configure(image=self._get_titlebar_icon())
-        _apply_window_titlebar_theme(self.settings_window, self.config.dark_theme, colors)
+        self._refresh_titlebar_theme()
 
-    def _button(self, parent: tk.Widget, text: str, command, width: int | None = None) -> tk.Button:
+    def _button(
+        self,
+        parent: tk.Widget,
+        text: str,
+        command,
+        width: int | None = None,
+        *,
+        pixel_width: int | None = None,
+        height: int = 34,
+        font: tuple[str, int] | tuple[str, int, str] = ("Segoe UI", 9),
+        align: str = "center",
+    ) -> RoundButton:
         colors = self._palette()
-        button = tk.Button(
-            parent,
-            text=text,
-            command=command,
-            relief="flat",
-            borderwidth=1,
-            highlightthickness=1,
-            highlightbackground=colors["border"],
-            highlightcolor=colors["border"],
-            bg=colors["button_bg"],
-            fg=colors["text"],
-            activebackground=colors["button_hover"],
-            activeforeground=colors["text"],
-            disabledforeground=colors["muted"],
-            padx=10,
-            pady=6,
-            cursor="hand2",
-            width=width,
-        )
+        button = RoundButton(parent, text, command, colors, width_chars=width, height=height, width_px=pixel_width, font=font, align=align)
         return self._tag(button, "button")
 
     def _checkbutton(self, parent: tk.Widget, text: str, variable: tk.BooleanVar, command) -> tk.Checkbutton:
@@ -545,84 +943,25 @@ class MicMuteApp:
         except tk.TclError:
             pass
 
-    def _get_titlebar_icon(self) -> ImageTk.PhotoImage:
-        if self._titlebar_icon_ref is None:
-            self._titlebar_icon_ref = ImageTk.PhotoImage(load_app_icon(14))
-        return self._titlebar_icon_ref
-
-    def _titlebar_button(self, parent: tk.Widget, glyph: str, command, close: bool = False) -> tk.Button:
-        colors = self._palette()
-        button = tk.Button(
-            parent,
-            text=glyph,
-            command=command,
-            relief="flat",
-            borderwidth=0,
-            highlightthickness=0,
-            bg=colors["surface_bg"],
-            fg=colors["text"],
-            activebackground=colors["accent_off"] if close else colors["button_hover"],
-            activeforeground="#F7FAFC" if close else colors["text"],
-            disabledforeground=colors["muted"],
-            padx=0,
-            pady=0,
-            cursor="hand2",
-            width=4,
-            font=("Segoe MDL2 Assets", 10),
-        )
-        return self._tag(button, "titlebar_close_button" if close else "titlebar_button")
-
-    def _start_window_drag(self, event: tk.Event) -> None:
-        if self.settings_window is None or not self.settings_window.winfo_exists():
-            return
-        self._window_drag_offset_x = event.x_root - self.settings_window.winfo_x()
-        self._window_drag_offset_y = event.y_root - self.settings_window.winfo_y()
-
-    def _drag_window(self, event: tk.Event) -> None:
-        if self.settings_window is None or not self.settings_window.winfo_exists():
-            return
-        x = event.x_root - self._window_drag_offset_x
-        y = event.y_root - self._window_drag_offset_y
-        self.settings_window.geometry(f"+{x}+{y}")
-
-    def _rebuild_settings_window(self) -> None:
-        if self.settings_window is None or not self.settings_window.winfo_exists():
-            return
-        hwnd = wintypes.HWND(self.settings_window.winfo_id())
-        previous_alpha = 1.0
-        try:
-            try:
-                previous_alpha = float(self.settings_window.attributes("-alpha"))
-            except (tk.TclError, TypeError, ValueError):
-                previous_alpha = 1.0
-            self.settings_window.attributes("-alpha", 0.0)
-            user32.SendMessageW(hwnd, WM_SETREDRAW, 0, 0)
-            for child in self.settings_window.winfo_children():
-                child.destroy()
-            self._settings_ready = False
-            self._ensure_settings_window()
-        finally:
-            user32.SendMessageW(hwnd, WM_SETREDRAW, 1, 0)
-            user32.RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME)
-            try:
-                self.settings_window.attributes("-alpha", previous_alpha)
-            except tk.TclError:
-                pass
+    def _get_status_icon(self) -> ImageTk.PhotoImage:
+        self._status_icon_ref = ImageTk.PhotoImage(load_overlay_icon(self.current_state.is_muted, 42))
+        return self._status_icon_ref
 
     def _ensure_settings_window(self) -> None:
         self._setup_styles()
 
         if self.settings_window is None or not self.settings_window.winfo_exists():
             self.settings_window = tk.Toplevel(self.root)
-            self.settings_window.title(f"{APP_NAME} {APP_VERSION}")
-            self.settings_window.geometry("430x594")
+            self.settings_window.title(APP_NAME)
+            self.settings_window.geometry("430x448")
             self.settings_window.resizable(False, False)
             self.settings_window.protocol("WM_DELETE_WINDOW", self.hide_window)
             self.settings_window.bind("<Escape>", lambda _event: self.hide_window())
             self.settings_window.bind("<Alt-F4>", lambda _event: (self.hide_window(), "break")[1])
-            self.settings_window.overrideredirect(True)
+            self.settings_window.bind("<Map>", lambda _event: self._refresh_titlebar_theme())
             self._apply_app_icon(self.settings_window)
             _apply_appwindow_style(self.settings_window)
+            self._refresh_titlebar_theme()
             self._settings_ready = False
 
         if self._settings_ready:
@@ -632,65 +971,17 @@ class MicMuteApp:
 
         colors = self._palette()
         window = self.settings_window
-        window.configure(bg=colors["border"])
+        window.configure(bg=colors["window_bg"])
+        self._localized_widgets.clear()
 
-        root_frame = self._tag(tk.Frame(window, bg=colors["window_bg"]), "window_frame")
-        root_frame.pack(fill="both", expand=True, padx=1, pady=1)
-
-        self.titlebar_frame = self._tag(tk.Frame(root_frame, bg=colors["surface_bg"], height=34), "titlebar_frame")
-        self.titlebar_frame.pack(fill="x")
-        self.titlebar_frame.pack_propagate(False)
-        for widget in (self.titlebar_frame,):
-            widget.bind("<ButtonPress-1>", self._start_window_drag)
-            widget.bind("<B1-Motion>", self._drag_window)
-
-        titlebar_left = self._tag(tk.Frame(self.titlebar_frame, bg=colors["surface_bg"]), "titlebar_frame")
-        titlebar_left.pack(side="left", fill="y")
-        titlebar_left.bind("<ButtonPress-1>", self._start_window_drag)
-        titlebar_left.bind("<B1-Motion>", self._drag_window)
-
-        self.titlebar_icon_label = self._tag(
-            tk.Label(
-                titlebar_left,
-                image=self._get_titlebar_icon(),
-                bg=colors["surface_bg"],
-                padx=10,
-                pady=0,
-            ),
-            "titlebar_icon",
-        )
-        self.titlebar_icon_label.pack(side="left", fill="y")
-        self.titlebar_icon_label.bind("<ButtonPress-1>", self._start_window_drag)
-        self.titlebar_icon_label.bind("<B1-Motion>", self._drag_window)
-
-        self.titlebar_label = self._tag(
-            tk.Label(
-                titlebar_left,
-                text=f"{APP_NAME} {APP_VERSION}",
-                bg=colors["surface_bg"],
-                fg=colors["text"],
-                font=("Segoe UI", 9),
-                anchor="w",
-                padx=0,
-            ),
-            "titlebar_text",
-        )
-        self.titlebar_label.pack(side="left", fill="y")
-        self.titlebar_label.bind("<ButtonPress-1>", self._start_window_drag)
-        self.titlebar_label.bind("<B1-Motion>", self._drag_window)
-
-        titlebar_buttons = self._tag(tk.Frame(self.titlebar_frame, bg=colors["surface_bg"]), "titlebar_frame")
-        titlebar_buttons.pack(side="right", fill="y")
-        self.titlebar_minimize_button = self._titlebar_button(titlebar_buttons, "\uE921", self.hide_window)
-        self.titlebar_minimize_button.pack(side="left", fill="y")
-        self.titlebar_close_button = self._titlebar_button(titlebar_buttons, "\uE8BB", self.hide_window, close=True)
-        self.titlebar_close_button.pack(side="left", fill="y")
+        root_frame = self._tag(tk.Frame(window, bg=colors["window_bg"], highlightthickness=1, highlightbackground=colors["border"]), "window_frame")
+        root_frame.pack(fill="both", expand=True)
 
         content = self._tag(tk.Frame(root_frame, bg=colors["window_bg"]), "window_frame")
-        content.pack(fill="both", expand=True, padx=12, pady=12)
+        content.pack(fill="both", expand=True, padx=8, pady=10)
 
         header = self._tag(tk.Frame(content, bg=colors["window_bg"]), "window_frame")
-        header.pack(fill="x", pady=(0, 8))
+        header.pack(fill="x", pady=(0, 10))
 
         self._tag(
             tk.Label(header, text="MicMute Lite", bg=colors["window_bg"], fg=colors["text"], font=("Segoe UI Semibold", 14)),
@@ -704,142 +995,137 @@ class MicMuteApp:
         self.lang_en_button = self._button(lang_box, "EN", lambda: self._set_language("en"), width=4)
         self.lang_en_button.pack(side="left", padx=(6, 0))
 
-        status_box = self._tag(
-            tk.Frame(content, bg=colors["surface_bg"], highlightthickness=1, highlightbackground=colors["border"]),
-            "surface_frame",
+        status_card = RoundedPanel(content, self._palette, height=72, fill_key="surface_raised", radius=14, padding=10)
+        status_card.pack(fill="x")
+        status_box = status_card.inner
+
+        status_box.grid_columnconfigure(0, weight=1)
+        status_left = self._tag(tk.Frame(status_box, bg=colors["surface_raised"]), "raised_frame")
+        status_left.grid(row=0, column=0, sticky="nsew")
+
+        self.status_icon_label = self._tag(
+            tk.Label(status_left, image=self._get_status_icon(), bg=colors["surface_raised"]),
+            "raised_text",
         )
-        status_box.pack(fill="x")
+        self.status_icon_label.pack(side="left", padx=(0, 10))
+
+        status_texts = self._tag(tk.Frame(status_left, bg=colors["surface_raised"]), "raised_frame")
+        status_texts.pack(side="left", fill="both", expand=True)
 
         self.status_label = self._tag(
-            tk.Label(status_box, textvariable=self.status_var, bg=colors["surface_bg"], fg=colors["accent_off"], font=("Segoe UI Semibold", 12)),
-            "surface_text",
+            tk.Label(status_texts, textvariable=self.status_var, bg=colors["surface_raised"], fg=colors["accent_off"], font=("Segoe UI Semibold", 11)),
+            "raised_text",
         )
-        self.status_label.pack(anchor="w", padx=12, pady=(8, 2))
+        self.status_label.pack(anchor="w", pady=(1, 2))
 
         self.substatus_label = self._tag(
-            tk.Label(status_box, textvariable=self.substatus_var, bg=colors["surface_bg"], fg=colors["muted"], font=("Segoe UI", 9)),
-            "muted_surface",
+            tk.Label(status_texts, textvariable=self.substatus_var, bg=colors["surface_raised"], fg=colors["muted"], font=("Segoe UI", 8)),
+            "muted_raised",
         )
-        self.substatus_label.pack(anchor="w", padx=12, pady=(0, 8))
+        self.substatus_label.pack(anchor="w")
 
-        self._button(status_box, self._text("toggle_now"), self.toggle_microphone).pack(anchor="e", padx=12, pady=(0, 8))
+        toggle_button = self._localize(self._button(status_box, "", self.toggle_microphone, pixel_width=108, height=32), "toggle_now")
+        toggle_button.grid(row=0, column=1, sticky="e", padx=(8, 0), pady=8)
 
         form = self._tag(tk.Frame(content, bg=colors["window_bg"]), "window_frame")
-        form.pack(fill="both", expand=True, pady=(10, 0))
-        form.grid_columnconfigure(0, weight=1)
+        form.pack(fill="both", expand=True, pady=(8, 0))
+        form.grid_columnconfigure(0, weight=1, uniform="columns")
+        form.grid_columnconfigure(1, weight=1, uniform="columns")
 
-        self._add_label(form, self._text("mic"), 0)
-        self.mic_combo = ttk.Combobox(form, textvariable=self.mic_var, state="readonly", width=38, style="MicMute.TCombobox")
-        self.mic_combo.grid(row=1, column=0, sticky="ew")
-        self.mic_combo.bind("<<ComboboxSelected>>", self._on_microphone_selected)
-        self._button(form, self._text("refresh"), self._load_microphones, width=10).grid(row=1, column=1, padx=(8, 0))
+        mic_card = self._card(form, 0, 0, 2, height=80)
+        self._add_label(mic_card, "mic")
+        mic_row = self._tag(tk.Frame(mic_card, bg=colors["surface_bg"]), "surface_frame")
+        mic_row.pack(fill="x", pady=(6, 0))
+        mic_row.grid_columnconfigure(0, weight=1)
+        self.mic_combo = DarkSelect(mic_row, self._palette, command=self._on_microphone_selected)
+        self.mic_combo.grid(row=0, column=0, sticky="ew")
+        self._button(mic_row, "\uE72C", self._load_microphones, pixel_width=32, height=30, font=("Segoe MDL2 Assets", 9)).grid(row=0, column=1, padx=(6, 0))
 
-        self._add_label(form, self._text("mode"), 2, pady=(10, 0))
-        self.mode_combo = ttk.Combobox(form, textvariable=self.mode_var, values=self._mode_values(), state="readonly", width=22, style="MicMute.TCombobox")
-        self.mode_combo.grid(row=3, column=0, sticky="w")
-        self.mode_combo.bind("<<ComboboxSelected>>", self._on_mode_changed)
+        mode_card = self._card(form, 1, 0, 1, height=84)
+        self._add_label(mode_card, "mode")
+        self.mode_combo = DarkSelect(mode_card, self._palette, command=self._on_mode_changed)
+        self.mode_combo.pack(fill="x", pady=(6, 0))
 
-        self._add_label(form, self._text("bind"), 4, pady=(10, 0))
-        hotkey_row = self._tag(tk.Frame(form, bg=colors["window_bg"]), "window_frame")
-        hotkey_row.grid(row=5, column=0, columnspan=2, sticky="ew")
+        bind_card = self._card(form, 1, 1, 1, height=84)
+        self._add_label(bind_card, "bind")
+        hotkey_row = self._tag(tk.Frame(bind_card, bg=colors["surface_bg"]), "surface_frame")
+        hotkey_row.pack(fill="x", pady=(6, 0))
         hotkey_row.grid_columnconfigure(0, weight=1)
 
-        self._tag(
-            tk.Label(
-                hotkey_row,
-                textvariable=self.hotkey_var,
-                bg=colors["input_bg"],
-                fg=colors["text"],
-                font=("Consolas", 10),
-                anchor="w",
-                relief="flat",
-                highlightthickness=1,
-                highlightbackground=colors["border"],
-                highlightcolor=colors["border"],
-                padx=8,
-                pady=7,
-            ),
-            "input_label",
-        ).grid(row=0, column=0, sticky="ew")
-        self._button(hotkey_row, self._text("assign"), self._start_hotkey_capture, width=10).grid(row=0, column=1, padx=(8, 0))
-        self._button(hotkey_row, self._text("clear"), self._clear_hotkey, width=9).grid(row=0, column=2, padx=(6, 0))
-
-        options = self._tag(
-            tk.Frame(form, bg=colors["surface_bg"], highlightthickness=1, highlightbackground=colors["border"]),
-            "surface_frame",
+        self.hotkey_button = self._button(
+            hotkey_row,
+            self.hotkey_var.get(),
+            self._start_hotkey_capture,
+            pixel_width=126,
+            height=30,
+            font=("Consolas", 10),
+            align="left",
         )
-        options.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        self._checkbutton(options, self._text("dark_theme"), self.theme_var, self._on_theme_changed).pack(anchor="w", padx=10, pady=(8, 0))
-        self._checkbutton(options, self._text("sounds_enabled"), self.sounds_var, self._save_general_settings).pack(anchor="w", padx=10, pady=(0, 8))
+        self.hotkey_button.grid(row=0, column=0, sticky="w")
+        self._button(hotkey_row, "\uE711", self._clear_hotkey, pixel_width=34, height=30, font=("Segoe MDL2 Assets", 9)).grid(row=0, column=1, padx=(6, 0))
 
-        self._add_label(form, self._text("overlay"), 7, pady=(10, 0))
-        overlay_box = self._tag(
-            tk.Frame(form, bg=colors["surface_bg"], highlightthickness=1, highlightbackground=colors["border"]),
-            "surface_frame",
-        )
-        overlay_box.grid(row=8, column=0, columnspan=2, sticky="ew")
+        general_card = self._card(form, 2, 0, 1, height=110)
+        self._add_label(general_card, "general")
+        self._localize(self._checkbutton(general_card, "", self.autostart_var, self._on_autostart_changed), "autostart").pack(anchor="w", pady=(8, 2))
+        self._localize(self._checkbutton(general_card, "", self.sounds_var, self._save_general_settings), "sounds_enabled").pack(anchor="w", pady=(2, 0))
 
-        self._checkbutton(overlay_box, self._text("show_overlay"), self.overlay_var, self._save_visual_settings).pack(anchor="w", padx=10, pady=(8, 4))
-
-        move_row = self._tag(tk.Frame(overlay_box, bg=colors["surface_bg"]), "surface_frame")
-        move_row.pack(fill="x", padx=10, pady=(0, 4))
-        self.overlay_edit_button = self._button(move_row, self._text("edit_overlay"), self._toggle_overlay_edit)
-        self.overlay_edit_button.pack(side="left")
-        self._tag(
-            tk.Label(
-                move_row,
-                text=self._text("overlay_drag_hint"),
-                bg=colors["surface_bg"],
-                fg=colors["muted"],
-                font=("Segoe UI", 9),
-                wraplength=200,
-                justify="left",
-            ),
-            "muted_surface",
-        ).pack(side="left", padx=(10, 0))
-
-        self._tag(
-            tk.Label(
-                form,
-                text=self._text("sound_note"),
-                bg=colors["window_bg"],
-                fg=colors["muted"],
-                wraplength=390,
-                justify="left",
-                font=("Segoe UI", 9),
-            ),
-            "muted_window",
-        ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(10, 0))
-
-        bottom = self._tag(tk.Frame(content, bg=colors["window_bg"]), "window_frame")
-        bottom.pack(fill="x", pady=(10, 0))
-        self._button(bottom, self._text("hide"), self.hide_window, width=10).pack(side="right")
+        overlay_box = self._card(form, 2, 1, 1, height=110)
+        self._add_label(overlay_box, "overlay")
+        self._localize(self._checkbutton(overlay_box, "", self.overlay_var, self._save_visual_settings), "show_overlay").pack(anchor="w", pady=(8, 4))
+        self.overlay_edit_button = self._localize(self._button(overlay_box, "", self._toggle_overlay_edit, pixel_width=86, height=30), "edit_overlay")
+        self.overlay_edit_button.pack(anchor="w", pady=(2, 0))
 
         self._settings_ready = True
         self._apply_theme()
         self._sync_settings_ui()
 
-    def _add_label(self, parent: tk.Widget, text: str, row: int, pady: tuple[int, int] = (0, 0)) -> None:
-        self._tag(
-            tk.Label(parent, text=text, bg=self._palette()["window_bg"], fg=self._palette()["text"], font=("Segoe UI Semibold", 9)),
-            "window_text",
-        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=pady)
+    def _refresh_titlebar_theme(self) -> None:
+        if self.settings_window is None or not self.settings_window.winfo_exists():
+            return
+        _apply_window_titlebar_theme(self.settings_window, True, self._palette())
+        for delay in (50, 160, 320):
+            self.settings_window.after(
+                delay,
+                lambda: _apply_window_titlebar_theme(self.settings_window, True, self._palette())
+                if self.settings_window and self.settings_window.winfo_exists()
+                else None,
+            )
+
+    def _card(self, parent: tk.Widget, row: int, column: int, columnspan: int, height: int) -> tk.Frame:
+        card = RoundedPanel(parent, self._palette, height=height, fill_key="surface_bg", radius=14, padding=10)
+        right_pad = 0 if columnspan > 1 or column == 1 else 5
+        card.grid(row=row, column=column, columnspan=columnspan, sticky="ew", pady=(0, 8), padx=(0 if column == 0 else 5, right_pad))
+        card.inner.grid_columnconfigure(0, weight=1)
+        return card.inner
+
+    def _add_label(self, parent: tk.Widget, key: str) -> None:
+        self._localize(
+            self._tag(
+                tk.Label(parent, bg=self._palette()["surface_bg"], fg=self._palette()["text"], font=("Segoe UI Semibold", 9)),
+                "surface_text",
+            ),
+            key,
+        ).pack(anchor="w")
+
+    def _set_hotkey_text(self, text: str) -> None:
+        self.hotkey_var.set(text)
+        if self.hotkey_button is not None:
+            self.hotkey_button.configure(text=text)
 
     def _sync_settings_ui(self) -> None:
         self.mode_var.set(self._mode_label(self.config.mode))
-        self.hotkey_var.set(self.config.hotkey.label if self.config.hotkey else self._text("unassigned"))
-        self.theme_var.set(self.config.dark_theme)
+        self._set_hotkey_text(self.config.hotkey.label if self.config.hotkey else self._text("unassigned"))
         self.sounds_var.set(self.config.sounds_enabled)
+        self.autostart_var.set(self.config.autostart)
         self.overlay_var.set(self.config.overlay_enabled)
         self.overlay_x_var.set(round(self.config.overlay_position_x * 100))
         self.overlay_y_var.set(round(self.config.overlay_position_y * 100))
         self.overlay_scale_var.set(round(self.config.overlay_scale * 100))
         self._sync_microphone_combo()
         self._sync_overlay_edit_button_state()
-        self._style_combobox_popdown(self.mic_combo)
-        self._style_combobox_popdown(self.mode_combo)
         if self.mode_combo is not None:
-            self.mode_combo.configure(values=self._mode_values())
+            selected_index = MODE_ORDER.index(self.config.mode) if self.config.mode in MODE_ORDER else 0
+            self.mode_combo.set_options(self._mode_values(), selected_index)
         self._update_language_buttons_state()
 
     def _sync_microphone_combo(self) -> None:
@@ -857,10 +1143,22 @@ class MicMuteApp:
             elif device.is_default:
                 selected_index = index
 
-        self.mic_combo["values"] = values
         if values:
-            self.mic_combo.current(selected_index)
+            self.mic_combo.set_options(values, selected_index)
             self.mic_var.set(values[selected_index])
+        else:
+            self.mic_combo.set_options([])
+
+    def _ensure_guardian_for_device(self, device_id: str | None = None) -> None:
+        target_device_id = self.config.microphone_id if device_id is None else device_id
+        if target_device_id in self._guardian_device_ids:
+            return
+        if start_guardian(target_device_id):
+            self._guardian_device_ids.add(target_device_id)
+
+    def _ensure_guardian_if_muted(self) -> None:
+        if self.current_state.is_available and self.current_state.is_muted:
+            self._ensure_guardian_for_device()
 
     def _load_microphones(self) -> None:
         self.devices = self.audio.list_devices()
@@ -871,8 +1169,7 @@ class MicMuteApp:
 
     def _save_general_settings(self) -> None:
         self.config.mode = self._selected_mode()
-        self.config.dark_theme = self.theme_var.get()
-        self.config.suppress_hotkey = True
+        self.config.suppress_hotkey = False
         self.config.sounds_enabled = self.sounds_var.get()
         self.config_store.save(self.config)
         self._apply_runtime_state(enforce_idle_state=True, play_sound=False)
@@ -895,16 +1192,32 @@ class MicMuteApp:
         self.config.language = language
         self.config_store.save(self.config)
         self.tray.set_language()
-        self.hotkey_var.set(self.config.hotkey.label if self.config.hotkey else self._text("unassigned"))
-        if self.settings_window is not None and self.settings_window.winfo_exists():
-            self._rebuild_settings_window()
+        self._refresh_localized_text()
         self._refresh_status_ui()
 
-    def _on_theme_changed(self) -> None:
-        self.config.dark_theme = self.theme_var.get()
+    def _on_autostart_changed(self) -> None:
+        self.config.autostart = self.autostart_var.get()
+        try:
+            set_autostart(self.config.autostart)
+        except OSError:
+            self.config.autostart = False
+            self.autostart_var.set(False)
         self.config_store.save(self.config)
-        self._apply_theme()
-        self._apply_overlay()
+
+    def _refresh_localized_text(self) -> None:
+        for widget, key in list(self._localized_widgets):
+            try:
+                if widget.winfo_exists():
+                    widget.configure(text=self._text(key))
+            except tk.TclError:
+                continue
+        self._set_hotkey_text(self.config.hotkey.label if self.config.hotkey else self._text("unassigned"))
+        if self.mode_combo is not None:
+            selected_index = MODE_ORDER.index(self.config.mode) if self.config.mode in MODE_ORDER else 0
+            self.mode_combo.set_options(self._mode_values(), selected_index)
+        self._sync_microphone_combo()
+        self._update_language_buttons_state()
+        self._sync_overlay_edit_button_state()
 
     def _toggle_overlay_edit(self) -> None:
         if self._overlay_edit_active:
@@ -960,6 +1273,7 @@ class MicMuteApp:
         self.config.microphone_id = "" if self.devices[index].is_default else self.devices[index].id
         self.config_store.save(self.config)
         self.current_state = self.audio.get_state(self.config.microphone_id)
+        self._ensure_guardian_if_muted()
         self._apply_runtime_state(enforce_idle_state=True, play_sound=False)
 
     def _on_mode_changed(self, _event=None) -> None:
@@ -967,13 +1281,13 @@ class MicMuteApp:
         self._save_general_settings()
 
     def _start_hotkey_capture(self) -> None:
-        self.hotkey_var.set(self._text("capture"))
+        self._set_hotkey_text(self._text("capture"))
         self.hooks.begin_capture()
 
     def _clear_hotkey(self) -> None:
         self.config.hotkey = None
         self.config_store.save(self.config)
-        self.hotkey_var.set(self._text("unassigned"))
+        self._set_hotkey_text(self._text("unassigned"))
         self._apply_runtime_state(enforce_idle_state=False, play_sound=False)
 
     def _enqueue_hook_event(self, event_name: str, hotkey: HotkeySpec | None) -> None:
@@ -999,6 +1313,9 @@ class MicMuteApp:
             elif event_name == "toggle_overlay":
                 self.overlay_var.set(not self.overlay_var.get())
                 self._save_visual_settings()
+            elif event_name == "show_tray_menu":
+                if isinstance(payload, tuple) and len(payload) == 2:
+                    self._show_tray_menu(int(payload[0]), int(payload[1]))
             elif event_name == "exit":
                 self.exit_app()
 
@@ -1006,10 +1323,10 @@ class MicMuteApp:
 
     def _handle_hotkey_capture(self, payload: object | None) -> None:
         if not isinstance(payload, HotkeySpec):
-            self.hotkey_var.set(self.config.hotkey.label if self.config.hotkey else self._text("unassigned"))
+            self._set_hotkey_text(self.config.hotkey.label if self.config.hotkey else self._text("unassigned"))
             return
         self.config.hotkey = payload
-        self.hotkey_var.set(payload.label)
+        self._set_hotkey_text(payload.label)
         self.config_store.save(self.config)
         self._apply_runtime_state(enforce_idle_state=False, play_sound=False)
 
@@ -1038,11 +1355,12 @@ class MicMuteApp:
         elif self.config.mode == "push_to_mute":
             self.set_microphone_muted(False, trigger="ptm_release")
 
-    def _apply_runtime_state(self, enforce_idle_state: bool, play_sound: bool) -> None:
-        self.hooks.set_hotkey(self.config.hotkey, True)
+    def _apply_runtime_state(self, enforce_idle_state: bool, play_sound: bool, refresh_state: bool = True) -> None:
+        self.hooks.set_hotkey(self.config.hotkey, self.config.suppress_hotkey)
         if enforce_idle_state:
             self._apply_mode_idle_state(play_sound=play_sound)
-        self.current_state = self.audio.get_state(self.config.microphone_id)
+        if refresh_state:
+            self.current_state = self.audio.get_state(self.config.microphone_id)
         self._refresh_status_ui()
         self._apply_overlay()
 
@@ -1071,7 +1389,7 @@ class MicMuteApp:
             self.current_state = state
             self._refresh_status_ui()
             self._apply_overlay()
-        self.root.after(500, self._poll_microphone_state)
+        self.root.after(800, self._poll_microphone_state)
 
     def _refresh_status_ui(self) -> None:
         colors = self._palette()
@@ -1088,18 +1406,32 @@ class MicMuteApp:
         self.status_var.set(status_text)
         self.substatus_var.set(sub_text)
         if self.status_label is not None:
-            self.status_label.configure(fg=accent, bg=colors["surface_bg"])
+            self.status_label.configure(fg=accent, bg=colors["surface_raised"])
         if self.substatus_label is not None:
-            self.substatus_label.configure(fg=colors["muted"], bg=colors["surface_bg"])
+            self.substatus_label.configure(fg=colors["muted"], bg=colors["surface_raised"])
+        if self.status_icon_label is not None:
+            self.status_icon_label.configure(image=self._get_status_icon())
 
     def toggle_microphone(self) -> None:
-        self.current_state = self.audio.toggle(self.config.microphone_id)
+        previous_state = self.audio.get_state(self.config.microphone_id)
+        if not previous_state.is_available:
+            self.current_state = previous_state
+            self._refresh_status_ui()
+            self._apply_overlay()
+            return
+
+        target_muted = not previous_state.is_muted
+        if target_muted:
+            self._ensure_guardian_for_device()
+        self.current_state = self.audio.set_muted(self.config.microphone_id, target_muted)
         self._play_feedback_if_needed("toggle")
         self._refresh_status_ui()
         self._apply_overlay()
 
     def set_microphone_muted(self, muted: bool, trigger: str, play_feedback: bool = True) -> None:
         previous_state = self.current_state
+        if muted:
+            self._ensure_guardian_for_device()
         self.current_state = self.audio.set_muted(self.config.microphone_id, muted)
         if play_feedback and previous_state.is_muted != self.current_state.is_muted:
             self._play_feedback_if_needed(trigger)
@@ -1121,6 +1453,78 @@ class MicMuteApp:
         else:
             self.sounds.play("mute" if self.current_state.is_muted else "unmute")
 
+    def _show_tray_menu(self, x: int, y: int) -> None:
+        self._hide_tray_menu()
+        if self._tray_menu_resume_job is not None:
+            try:
+                self.root.after_cancel(self._tray_menu_resume_job)
+            except tk.TclError:
+                pass
+            self._tray_menu_resume_job = None
+        self.tray.set_custom_menu_active(True)
+        self._tray_menu_hotkeys_paused = True
+        self.hooks.set_hotkey(None, False)
+        colors = self._palette()
+        menu = tk.Toplevel(self.root)
+        menu.overrideredirect(True)
+        menu.attributes("-topmost", True)
+        menu.configure(bg=colors["surface_bg"])
+        self.tray_menu = menu
+
+        box = tk.Frame(menu, bg=colors["surface_bg"])
+        box.pack(fill="both", expand=True)
+
+        self._tray_menu_item(box, "tray_settings", self.show_settings).pack(fill="x")
+        self._tray_menu_item(box, "tray_exit", self.exit_app).pack(fill="x")
+
+        width = 118
+        height = 58
+        menu.geometry(f"{width}x{height}+{x - width}+{y - height}")
+        menu.bind("<FocusOut>", lambda _event: self._hide_tray_menu())
+        menu.after(10, menu.focus_force)
+
+    def _tray_menu_item(self, parent: tk.Widget, key: str, command) -> tk.Label:
+        colors = self._palette()
+        item = tk.Label(parent, text=self._text(key), anchor="w", padx=12, pady=6, bg=colors["surface_bg"], fg=colors["text"], font=("Segoe UI", 9))
+        item.configure(cursor="hand2")
+        item.bind("<Enter>", lambda _event: item.configure(bg=colors["button_hover"]))
+        item.bind("<Leave>", lambda _event: item.configure(bg=colors["surface_bg"]))
+        item.bind("<Button-1>", lambda _event: (self._hide_tray_menu(), command()))
+        return item
+
+    def _hide_tray_menu(self) -> None:
+        if self.tray_menu is not None and self.tray_menu.winfo_exists():
+            self.tray_menu.destroy()
+        self.tray_menu = None
+        if self._tray_menu_resume_job is None:
+            self._tray_menu_resume_job = self.root.after(450, self._resume_hotkeys_after_tray_menu)
+
+    def _resume_hotkeys_after_tray_menu(self) -> None:
+        self._tray_menu_resume_job = None
+        self.tray.set_custom_menu_active(False)
+        if not self._tray_menu_hotkeys_paused:
+            return
+        self._tray_menu_hotkeys_paused = False
+        self.hooks.set_hotkey(self.config.hotkey, self.config.suppress_hotkey)
+
+    def _force_settings_foreground(self) -> None:
+        if self.settings_window is None or not self.settings_window.winfo_exists():
+            return
+        try:
+            self.settings_window.attributes("-topmost", True)
+            self.settings_window.lift()
+            self.settings_window.focus_force()
+            for handle in _window_handles(self.settings_window):
+                hwnd = wintypes.HWND(handle)
+                user32.ShowWindow(hwnd, SW_RESTORE)
+                user32.BringWindowToTop(hwnd)
+                user32.SetForegroundWindow(hwnd)
+                user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED)
+                user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED)
+            self.settings_window.after(350, lambda: self.settings_window.attributes("-topmost", False) if self.settings_window and self.settings_window.winfo_exists() else None)
+        except (tk.TclError, OSError, ValueError):
+            pass
+
     def show_settings(self) -> None:
         self._ensure_settings_window()
         self._sync_settings_ui()
@@ -1130,15 +1534,11 @@ class MicMuteApp:
         self.settings_window.deiconify()
         self.settings_window.update_idletasks()
         _apply_appwindow_style(self.settings_window)
-        _apply_window_titlebar_theme(self.settings_window, self.config.dark_theme, self._palette())
-        self.settings_window.lift()
-        self.settings_window.focus_force()
+        self._refresh_titlebar_theme()
+        self._force_settings_foreground()
         self.settings_window.after(
-            60,
-            lambda: (
-                _apply_appwindow_style(self.settings_window),
-                _apply_window_titlebar_theme(self.settings_window, self.config.dark_theme, self._palette()),
-            )
+            80,
+            lambda: (_apply_appwindow_style(self.settings_window), self._refresh_titlebar_theme(), self._force_settings_foreground())
             if self.settings_window and self.settings_window.winfo_exists()
             else None,
         )
@@ -1153,10 +1553,19 @@ class MicMuteApp:
     def run(self) -> None:
         self.root.mainloop()
 
+    def _restore_microphone_on_exit(self) -> None:
+        try:
+            state = self.audio.get_state(self.config.microphone_id)
+            if state.is_available and state.is_muted:
+                self.current_state = self.audio.set_muted(self.config.microphone_id, False)
+        except Exception:
+            pass
+
     def exit_app(self) -> None:
         if self._overlay_edit_active:
             self._overlay_edit_active = False
             self.overlay.finish_edit(commit=True)
+        self._restore_microphone_on_exit()
         self.config_store.save(self.config)
         try:
             self.overlay.destroy()

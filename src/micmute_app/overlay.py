@@ -184,7 +184,7 @@ class OverlayManager:
             self._current_x = config.overlay_position_x
             self._current_y = config.overlay_position_y
 
-        self._apply_visuals(config.dark_theme, is_muted)
+        self._apply_visuals(True, is_muted)
         self._move_to_normalized(self._current_x, self._current_y)
 
         if config.overlay_enabled or self._editing:

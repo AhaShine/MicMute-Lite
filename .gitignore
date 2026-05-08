@@ -2,7 +2,10 @@
 build/
 dist/
 __pycache__/
+.ruff_cache/
+.mypy_cache/
 *.py[cod]
 *.spec
 config.json
+*.log
 Thumbs.db
